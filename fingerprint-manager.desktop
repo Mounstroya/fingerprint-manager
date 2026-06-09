@@ -1,0 +1,12 @@
+[Desktop Entry]
+Name=Huellas dactilares
+Name[es]=Huellas dactilares
+Comment=Administra las huellas de tu lector de huella
+Comment[es]=Administra las huellas de tu lector de huella
+Exec=fingerprint-manager
+Icon=dialog-password
+Terminal=false
+Type=Application
+Categories=Settings;
+Keywords=huella;fingerprint;biometrico;
+StartupNotify=true
