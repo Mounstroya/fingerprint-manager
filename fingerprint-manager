@@ -5,23 +5,25 @@ from gi.repository import Gtk, GLib, Gdk
 import dbus
 import dbus.mainloop.glib
 import getpass
+import subprocess
 import sys
 
 dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
 
 USERNAME = getpass.getuser()
+PAM_FILE = '/etc/pam.d/common-auth'
 
 FINGER_LABELS = {
-    'right-thumb':         ('Pulgar derecho',    '🖒'),
-    'right-index-finger':  ('Índice derecho',    '☞'),
-    'right-middle-finger': ('Medio derecho',     '🖕'),
-    'right-ring-finger':   ('Anular derecho',    '💍'),
-    'right-little-finger': ('Meñique derecho',   '🤙'),
-    'left-thumb':          ('Pulgar izquierdo',  '🖒'),
-    'left-index-finger':   ('Índice izquierdo',  '☞'),
-    'left-middle-finger':  ('Medio izquierdo',   '🖕'),
-    'left-ring-finger':    ('Anular izquierdo',  '💍'),
-    'left-little-finger':  ('Meñique izquierdo', '🤙'),
+    'right-thumb':         'Pulgar derecho',
+    'right-index-finger':  'Índice derecho',
+    'right-middle-finger': 'Medio derecho',
+    'right-ring-finger':   'Anular derecho',
+    'right-little-finger': 'Meñique derecho',
+    'left-thumb':          'Pulgar izquierdo',
+    'left-index-finger':   'Índice izquierdo',
+    'left-middle-finger':  'Medio izquierdo',
+    'left-ring-finger':    'Anular izquierdo',
+    'left-little-finger':  'Meñique izquierdo',
 }
 
 ENROLL_MESSAGES = {
@@ -54,17 +56,37 @@ APP_CSS = b"""
     font-size: 15px;
     font-weight: bold;
 }
+.device-box {
+    padding: 8px 20px;
+    background-color: alpha(@theme_fg_color, 0.04);
+}
+.device-name {
+    font-size: 13px;
+    font-weight: bold;
+}
+.device-detail {
+    font-size: 12px;
+}
 .content-box {
     padding: 16px;
 }
+.section-title {
+    font-size: 12px;
+    font-weight: bold;
+    color: alpha(@theme_fg_color, 0.55);
+}
+.pam-box {
+    padding: 12px 16px;
+    border-radius: 4px;
+}
+.pam-active   { color: #27ae60; font-size: 13px; }
+.pam-inactive { color: alpha(@theme_fg_color, 0.5); font-size: 13px; }
 .empty-label {
     color: alpha(@text_color, 0.5);
     font-size: 13px;
     padding: 24px;
 }
-.error-banner label {
-    font-size: 13px;
-}
+.error-banner label { font-size: 13px; }
 .status-info    { color: @theme_selected_bg_color; font-size: 13px; }
 .status-success { color: #27ae60; font-size: 13px; font-weight: bold; }
 .status-error   { color: #e74c3c; font-size: 13px; font-weight: bold; }
@@ -106,10 +128,46 @@ def check_device():
         return False, f'Error al conectar con fprintd: {msg}'
 
 
+def get_device_info():
+    """Returns dict with name, scan_type, num_stages or None on error."""
+    try:
+        _, _, _, props = get_device()
+        name = str(props.Get('net.reactivated.Fprint.Device', 'name'))
+        stages = int(props.Get('net.reactivated.Fprint.Device', 'num-enroll-stages'))
+        scan_raw = str(props.Get('net.reactivated.Fprint.Device', 'scan-type'))
+        scan = 'Presión' if scan_raw == 'press' else 'Deslizamiento'
+        return {'name': name, 'stages': stages, 'scan': scan}
+    except Exception:
+        return None
+
+
+def is_pam_enabled():
+    try:
+        with open(PAM_FILE) as f:
+            return 'pam_fprintd' in f.read()
+    except Exception:
+        return False
+
+
+def set_pam(enable):
+    """Toggle fprintd in PAM. Returns (success, error_msg)."""
+    if enable:
+        cmd = 'pam-auth-update --enable fprintd'
+    else:
+        cmd = 'pam-auth-update --disable fprintd'
+    result = subprocess.run(
+        ['pkexec', 'sh', '-c', cmd],
+        capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        return False, result.stderr.strip() or 'Error desconocido'
+    return True, None
+
+
 class EnrollDialog(Gtk.Dialog):
     def __init__(self, parent, enrolled_fingers):
         super().__init__(title='Registrar nueva huella', transient_for=parent, modal=True)
-        self.set_default_size(420, 320)
+        self.set_default_size(380, 280)
         self.set_border_width(0)
 
         self._bus = self._dev_obj = self._dev = None
@@ -125,50 +183,17 @@ class EnrollDialog(Gtk.Dialog):
         box.set_border_width(20)
         content.pack_start(box, True, True, 0)
 
-        # Finger selector + hand highlight
-        selector_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-
-        combo_col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        lbl = Gtk.Label(label='Dedo:')
+        lbl = Gtk.Label(label='Dedo a registrar:')
         lbl.set_xalign(0)
-        combo_col.pack_start(lbl, False, False, 0)
+        box.pack_start(lbl, False, False, 0)
+
         self._combo = Gtk.ComboBoxText()
-        for key, (name, icon) in FINGER_LABELS.items():
+        for key, name in FINGER_LABELS.items():
             if key not in enrolled_fingers:
-                self._combo.append(key, f'{icon}  {name}')
+                self._combo.append(key, name)
         self._combo.set_active(0)
-        self._combo.connect('changed', self._on_finger_changed)
-        combo_col.pack_start(self._combo, False, False, 0)
-        selector_row.pack_start(combo_col, True, True, 0)
+        box.pack_start(self._combo, False, False, 0)
 
-        # Hand icons
-        hands_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        hands_box.set_valign(Gtk.Align.CENTER)
-        left_col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-        left_title = Gtk.Label()
-        left_title.set_markup('<small>Izquierda</small>')
-        left_title.get_style_context().add_class('dim-label')
-        self._left_hand = Gtk.Label()
-        self._left_hand.set_markup('<span font="30">🖐</span>')
-        left_col.pack_start(left_title, False, False, 0)
-        left_col.pack_start(self._left_hand, False, False, 0)
-
-        right_col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-        right_title = Gtk.Label()
-        right_title.set_markup('<small>Derecha</small>')
-        right_title.get_style_context().add_class('dim-label')
-        self._right_hand = Gtk.Label()
-        self._right_hand.set_markup('<span font="30">🖐</span>')
-        right_col.pack_start(right_title, False, False, 0)
-        right_col.pack_start(self._right_hand, False, False, 0)
-
-        hands_box.pack_start(left_col, False, False, 0)
-        hands_box.pack_start(right_col, False, False, 0)
-        selector_row.pack_end(hands_box, False, False, 0)
-        box.pack_start(selector_row, False, False, 0)
-        self._on_finger_changed(self._combo)
-
-        # Progress
         self._progress = Gtk.ProgressBar()
         self._progress.set_show_text(True)
         self._progress.set_text('0%')
@@ -179,7 +204,6 @@ class EnrollDialog(Gtk.Dialog):
         self._stage_lbl.set_xalign(0.5)
         box.pack_start(self._stage_lbl, False, False, 0)
 
-        # Status
         self._status_lbl = Gtk.Label(label='Selecciona un dedo y presiona Iniciar.')
         self._status_lbl.set_line_wrap(True)
         self._status_lbl.set_xalign(0.5)
@@ -187,7 +211,6 @@ class EnrollDialog(Gtk.Dialog):
         self._status_lbl.set_size_request(-1, 40)
         box.pack_start(self._status_lbl, True, True, 0)
 
-        # Buttons
         btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         btn_box.set_halign(Gtk.Align.END)
         self._cancel_btn = Gtk.Button(label='Cancelar')
@@ -201,20 +224,6 @@ class EnrollDialog(Gtk.Dialog):
 
         self.show_all()
         self.connect('delete-event', lambda *a: self._cancel_enrollment() or False)
-
-    def _on_finger_changed(self, combo):
-        finger = combo.get_active_id() or ''
-        dim = '<span font="30" alpha="50%">🖐</span>'
-        active = '<span font="30">🖐</span>'
-        if 'left' in finger:
-            self._left_hand.set_markup('<span font="30" color="#27ae60">🖐</span>')
-            self._right_hand.set_markup(dim)
-        elif 'right' in finger:
-            self._right_hand.set_markup('<span font="30" color="#27ae60">🖐</span>')
-            self._left_hand.set_markup(dim)
-        else:
-            self._left_hand.set_markup(active)
-            self._right_hand.set_markup(active)
 
     def _set_status(self, msg, style='info'):
         for cls in ('status-info', 'status-success', 'status-error'):
@@ -247,8 +256,6 @@ class EnrollDialog(Gtk.Dialog):
         self._combo.set_sensitive(False)
         self._start_btn.set_sensitive(False)
         self._set_status('Coloca tu dedo en el lector...', 'info')
-
-        # Connect signal BEFORE starting
         self._signal = self._dev_obj.connect_to_signal('EnrollStatus', self._on_enroll_status)
         try:
             self._dev.EnrollStart(finger)
@@ -268,12 +275,6 @@ class EnrollDialog(Gtk.Dialog):
             plural = 'captura' if self._stages_done == 1 else 'capturas'
             self._stage_lbl.set_markup(
                 f'<small>{self._stages_done} {plural} de {self._total_stages}</small>')
-            # Flash green on the active hand
-            finger = self._combo.get_active_id() or ''
-            side = 'left' if 'left' in finger else 'right'
-            hand = self._left_hand if side == 'left' else self._right_hand
-            hand.set_markup('<span font="30" color="#27ae60">✓</span>')
-            GLib.timeout_add(400, lambda: self._on_finger_changed(self._combo) or False)
             self._set_status(msg, 'info')
 
         elif result == 'enroll-completed':
@@ -300,11 +301,9 @@ class EnrollDialog(Gtk.Dialog):
             self._set_status(msg, 'info')
 
     def _release_device(self, stop=True):
-        # Cancel pending auto-close
         if self._response_timeout:
             GLib.source_remove(self._response_timeout)
             self._response_timeout = None
-        # Remove signal BEFORE releasing to prevent stray callbacks
         if self._signal:
             self._signal.remove()
             self._signal = None
@@ -332,11 +331,10 @@ class EnrollDialog(Gtk.Dialog):
 class VerifyDialog(Gtk.Dialog):
     def __init__(self, parent):
         super().__init__(title='Probar huella', transient_for=parent, modal=True)
-        self.set_default_size(320, 230)
+        self.set_default_size(320, 200)
         self.set_border_width(0)
 
-        self._dev = None
-        self._dev_obj = None
+        self._dev = self._dev_obj = None
         self._sig_status = self._sig_finger = None
         self._verifying = False
 
@@ -346,8 +344,7 @@ class VerifyDialog(Gtk.Dialog):
         box.set_valign(Gtk.Align.CENTER)
         content.pack_start(box, True, True, 0)
 
-        self._icon = Gtk.Label()
-        self._icon.set_markup('<span font="52">👆</span>')
+        self._icon = Gtk.Image.new_from_icon_name('auth-fingerprint-symbolic', Gtk.IconSize.DIALOG)
         box.pack_start(self._icon, False, False, 0)
 
         self._status = Gtk.Label(label='Iniciando...')
@@ -373,14 +370,12 @@ class VerifyDialog(Gtk.Dialog):
             self._dev.Claim(USERNAME)
         except dbus.DBusException as e:
             msg = str(e.get_dbus_message())
-            if 'AlreadyInUse' in str(e):
-                self._set_status('Dispositivo en uso, intenta de nuevo.', 'error')
-            else:
-                self._set_status(f'Error: {msg}', 'error')
+            self._set_status(
+                'Dispositivo en uso, intenta de nuevo.' if 'AlreadyInUse' in str(e)
+                else f'Error: {msg}', 'error')
             return
 
         self._verifying = True
-        # Connect signals BEFORE starting verify
         self._sig_status = self._dev_obj.connect_to_signal('VerifyStatus', self._on_verify_status)
         self._sig_finger = self._dev_obj.connect_to_signal('VerifyFingerSelected', self._on_finger_selected)
         try:
@@ -391,20 +386,18 @@ class VerifyDialog(Gtk.Dialog):
             self._release_device()
 
     def _on_finger_selected(self, finger):
-        _, icon = FINGER_LABELS.get(str(finger), ('', '👆'))
-        self._icon.set_markup(f'<span font="52">{icon}</span>')
+        pass  # Could update icon here if needed
 
     def _on_verify_status(self, result, done):
         result = str(result)
         msg, style = VERIFY_MESSAGES.get(result, (result, 'info'))
         self._set_status(msg, style)
         if result == 'verify-match':
-            self._icon.set_markup('<span font="52">✅</span>')
+            self._icon.set_from_icon_name('emblem-default-symbolic', Gtk.IconSize.DIALOG)
         elif result == 'verify-no-match':
-            self._icon.set_markup('<span font="52">❌</span>')
+            self._icon.set_from_icon_name('dialog-error-symbolic', Gtk.IconSize.DIALOG)
         if done:
             self._verifying = False
-            # Call VerifyStop before releasing
             if self._dev:
                 try:
                     self._dev.VerifyStop()
@@ -413,7 +406,6 @@ class VerifyDialog(Gtk.Dialog):
             self._release_device()
 
     def _release_device(self):
-        # Remove signals BEFORE releasing
         for sig in (self._sig_status, self._sig_finger):
             if sig:
                 sig.remove()
@@ -438,7 +430,7 @@ class VerifyDialog(Gtk.Dialog):
 class FingerprintManager(Gtk.Window):
     def __init__(self):
         super().__init__(title='Huellas dactilares')
-        self.set_default_size(400, 400)
+        self.set_default_size(420, 480)
         self.set_border_width(0)
         self.set_resizable(False)
         self.connect('destroy', Gtk.main_quit)
@@ -446,26 +438,46 @@ class FingerprintManager(Gtk.Window):
         outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         self.add(outer)
 
-        # Header
+        # ── Header ──────────────────────────────────────────
         header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
         header.get_style_context().add_class('header-box')
         icon = Gtk.Image.new_from_icon_name('dialog-password-symbolic', Gtk.IconSize.LARGE_TOOLBAR)
         header.pack_start(icon, False, False, 0)
         title_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-        title = Gtk.Label(label='Huellas dactilares')
-        title.get_style_context().add_class('header-title')
-        title.set_xalign(0)
-        subtitle = Gtk.Label(label='Administra las huellas de tu lector')
-        subtitle.get_style_context().add_class('dim-label')
-        subtitle.set_xalign(0)
-        title_box.pack_start(title, False, False, 0)
-        title_box.pack_start(subtitle, False, False, 0)
+        title_lbl = Gtk.Label(label='Huellas dactilares')
+        title_lbl.get_style_context().add_class('header-title')
+        title_lbl.set_xalign(0)
+        subtitle_lbl = Gtk.Label(label='Administra las huellas de tu lector')
+        subtitle_lbl.get_style_context().add_class('dim-label')
+        subtitle_lbl.set_xalign(0)
+        title_box.pack_start(title_lbl, False, False, 0)
+        title_box.pack_start(subtitle_lbl, False, False, 0)
         header.pack_start(title_box, True, True, 0)
         outer.pack_start(header, False, False, 0)
 
         outer.pack_start(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL), False, False, 0)
 
-        # Device error banner (hidden by default)
+        # ── Device info row ─────────────────────────────────
+        self._dev_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        self._dev_box.get_style_context().add_class('device-box')
+        dev_icon = Gtk.Image.new_from_icon_name('auth-fingerprint-symbolic', Gtk.IconSize.MENU)
+        self._dev_box.pack_start(dev_icon, False, False, 0)
+        dev_text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
+        self._dev_name_lbl = Gtk.Label(label='Cargando...')
+        self._dev_name_lbl.get_style_context().add_class('device-name')
+        self._dev_name_lbl.set_xalign(0)
+        self._dev_detail_lbl = Gtk.Label()
+        self._dev_detail_lbl.get_style_context().add_class('device-detail')
+        self._dev_detail_lbl.get_style_context().add_class('dim-label')
+        self._dev_detail_lbl.set_xalign(0)
+        dev_text.pack_start(self._dev_name_lbl, False, False, 0)
+        dev_text.pack_start(self._dev_detail_lbl, False, False, 0)
+        self._dev_box.pack_start(dev_text, True, True, 0)
+        outer.pack_start(self._dev_box, False, False, 0)
+
+        outer.pack_start(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL), False, False, 0)
+
+        # ── Error banner ─────────────────────────────────────
         self._banner = Gtk.InfoBar()
         self._banner.set_message_type(Gtk.MessageType.WARNING)
         self._banner.get_style_context().add_class('error-banner')
@@ -475,16 +487,22 @@ class FingerprintManager(Gtk.Window):
         self._banner.set_no_show_all(True)
         outer.pack_start(self._banner, False, False, 0)
 
-        # Content
+        # ── Content ──────────────────────────────────────────
         content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
         content.get_style_context().add_class('content-box')
         outer.pack_start(content, True, True, 0)
+
+        # Finger list
+        sec_lbl = Gtk.Label(label='HUELLAS REGISTRADAS')
+        sec_lbl.get_style_context().add_class('section-title')
+        sec_lbl.set_xalign(0)
+        content.pack_start(sec_lbl, False, False, 0)
 
         frame = Gtk.Frame()
         frame.set_shadow_type(Gtk.ShadowType.IN)
         scroll = Gtk.ScrolledWindow()
         scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        scroll.set_min_content_height(220)
+        scroll.set_min_content_height(160)
         self._listbox = Gtk.ListBox()
         self._listbox.set_selection_mode(Gtk.SelectionMode.NONE)
         scroll.add(self._listbox)
@@ -501,8 +519,104 @@ class FingerprintManager(Gtk.Window):
         btn_row.pack_start(self._test_btn, False, False, 0)
         content.pack_start(btn_row, False, False, 0)
 
+        # ── PAM section ──────────────────────────────────────
+        content.pack_start(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL), False, False, 4)
+
+        pam_title = Gtk.Label(label='LOGIN Y SUDO')
+        pam_title.get_style_context().add_class('section-title')
+        pam_title.set_xalign(0)
+        content.pack_start(pam_title, False, False, 0)
+
+        pam_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        pam_box.get_style_context().add_class('pam-box')
+
+        pam_info = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        pam_desc = Gtk.Label(label='Usar huella para iniciar sesión y sudo')
+        pam_desc.set_xalign(0)
+        pam_desc.set_line_wrap(True)
+        self._pam_status_lbl = Gtk.Label()
+        self._pam_status_lbl.set_xalign(0)
+        pam_info.pack_start(pam_desc, False, False, 0)
+        pam_info.pack_start(self._pam_status_lbl, False, False, 0)
+        pam_box.pack_start(pam_info, True, True, 0)
+
+        self._pam_btn = Gtk.Button()
+        self._pam_btn.set_valign(Gtk.Align.CENTER)
+        self._pam_btn.connect('clicked', self._on_pam_toggle)
+        pam_box.pack_end(self._pam_btn, False, False, 0)
+
+        content.pack_start(pam_box, False, False, 0)
+
         self._refresh()
         self.show_all()
+
+    # ── Device info ──────────────────────────────────────────
+
+    def _update_device_info(self):
+        info = get_device_info()
+        if info:
+            self._dev_name_lbl.set_text(info['name'])
+            self._dev_detail_lbl.set_text(
+                f"Tipo: {info['scan']}  ·  {info['stages']} capturas por registro")
+        else:
+            self._dev_name_lbl.set_text('Dispositivo no disponible')
+            self._dev_detail_lbl.set_text('')
+
+    # ── PAM ──────────────────────────────────────────────────
+
+    def _update_pam_ui(self):
+        enabled = is_pam_enabled()
+        if enabled:
+            self._pam_status_lbl.set_text('Activo')
+            self._pam_status_lbl.get_style_context().remove_class('pam-inactive')
+            self._pam_status_lbl.get_style_context().add_class('pam-active')
+            self._pam_btn.set_label('Desactivar')
+        else:
+            self._pam_status_lbl.set_text('Inactivo')
+            self._pam_status_lbl.get_style_context().remove_class('pam-active')
+            self._pam_status_lbl.get_style_context().add_class('pam-inactive')
+            self._pam_btn.set_label('Activar')
+
+    def _on_pam_toggle(self, btn):
+        enable = not is_pam_enabled()
+        if enable:
+            msg = ('¿Activar huella para login y sudo?\n\n'
+                   'Se pedirá tu contraseña de administrador.\n'
+                   'Si la huella falla, siempre podrás usar tu contraseña.')
+        else:
+            msg = '¿Desactivar autenticación por huella para login y sudo?'
+
+        confirm = Gtk.MessageDialog(
+            transient_for=self, modal=True,
+            message_type=Gtk.MessageType.QUESTION,
+            buttons=Gtk.ButtonsType.YES_NO,
+            text='Configuración de acceso',
+        )
+        confirm.format_secondary_text(msg)
+        resp = confirm.run()
+        confirm.destroy()
+        if resp != Gtk.ResponseType.YES:
+            return
+
+        self._pam_btn.set_sensitive(False)
+        self._pam_btn.set_label('Aplicando...')
+
+        ok, err = set_pam(enable)
+        if not ok:
+            dlg = Gtk.MessageDialog(
+                transient_for=self, modal=True,
+                message_type=Gtk.MessageType.ERROR,
+                buttons=Gtk.ButtonsType.OK,
+                text='No se pudo cambiar la configuración'
+            )
+            dlg.format_secondary_text(err or 'Operación cancelada.')
+            dlg.run()
+            dlg.destroy()
+
+        self._pam_btn.set_sensitive(True)
+        self._update_pam_ui()
+
+    # ── Finger list ──────────────────────────────────────────
 
     def _show_banner(self, msg):
         self._banner_lbl.set_text(msg)
@@ -519,6 +633,9 @@ class FingerprintManager(Gtk.Window):
             return []
 
     def _refresh(self):
+        self._update_device_info()
+        self._update_pam_ui()
+
         for child in self._listbox.get_children():
             self._listbox.remove(child)
 
@@ -551,17 +668,16 @@ class FingerprintManager(Gtk.Window):
         self._listbox.show_all()
 
     def _make_row(self, finger_key):
-        name, icon = FINGER_LABELS.get(finger_key, (finger_key, '👆'))
+        name = FINGER_LABELS.get(finger_key, finger_key)
         row = Gtk.ListBoxRow()
         row.set_selectable(False)
         row.set_activatable(False)
         box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
         box.set_border_width(10)
 
-        icon_lbl = Gtk.Label()
-        icon_lbl.set_markup(f'<span font="20">{icon}</span>')
-        icon_lbl.set_size_request(36, -1)
-        box.pack_start(icon_lbl, False, False, 0)
+        fp_icon = Gtk.Image.new_from_icon_name('auth-fingerprint-symbolic', Gtk.IconSize.MENU)
+        fp_icon.set_size_request(24, -1)
+        box.pack_start(fp_icon, False, False, 0)
 
         name_lbl = Gtk.Label(label=name)
         name_lbl.set_xalign(0)
@@ -578,8 +694,7 @@ class FingerprintManager(Gtk.Window):
         return row
 
     def _on_add(self, btn):
-        enrolled = self._get_enrolled()
-        dlg = EnrollDialog(self, enrolled)
+        dlg = EnrollDialog(self, self._get_enrolled())
         dlg.run()
         dlg.destroy()
         self._refresh()
@@ -637,7 +752,7 @@ def check_runtime_deps():
         gi.require_version('Gtk', '3.0')
         from gi.repository import Gtk  # noqa
     except Exception:
-        missing.append('python3-gi  gir1.2-gtk-3.0')
+        missing.append('python3-gi gir1.2-gtk-3.0')
     if missing:
         print(f"ERROR: faltan dependencias: {', '.join(missing)}", file=sys.stderr)
         print('Instálalas con: sudo apt install ' + ' '.join(missing), file=sys.stderr)
