@@ -7,9 +7,11 @@ Built for XFCE but works on any GTK3 desktop.
 ## Features
 
 - List, enroll, and delete fingerprints for the current user
-- Live enrollment progress with per-scan feedback and hand highlight
-- Test/verify a fingerprint with visual result (✅ / ❌)
-- Device error detection on startup (fprintd not running, no reader found)
+- Device info bar showing reader name, scan type, and captures per enrollment
+- Live enrollment progress bar with stage counter
+- Test/verify fingerprint with visual feedback
+- One-click PAM toggle to enable/disable fingerprint for login and sudo
+- Error banner if fprintd is not running or no reader is found
 - Spanish UI
 
 ## Requirements
@@ -54,15 +56,12 @@ Or open it from the app menu under **Settings → Huellas dactilares**.
 
 ## Enabling fingerprint login / sudo (PAM)
 
-After enrolling a fingerprint, run:
+The app includes a **Login y sudo** section at the bottom with a toggle button.
+Click **Activar** and enter your admin password — that's it.
 
-```bash
-sudo pam-auth-update
-```
+To disable, click **Desactivar** in the same section.
 
-Enable **"Fingerprint authentication"** with the spacebar, then press Enter.
-
-> ⚠️ Always keep a terminal with an active session open while testing PAM changes to avoid lockouts.
+> ⚠️ If the fingerprint fails at login, your password always works as fallback.
 
 ## Troubleshooting
 
