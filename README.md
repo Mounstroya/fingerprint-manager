@@ -80,6 +80,16 @@ sudo systemctl enable fprintd
 **verify-no-match on Goodix 511**  
 See [goodix-fp-linux-dev/libfprint#37](https://github.com/goodix-fp-linux-dev/libfprint/pull/37).
 
+---
+
+## ☕ Was it useful?
+
+If this project saved you some time, you can buy me a coffee:
+
+[![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-mounstroya-FFDD00?style=for-the-badge&logo=buy-me-a-coffee&logoColor=black)](https://www.buymeacoffee.com/mounstroya)
+
+---
+
 ## License
 
 MIT
